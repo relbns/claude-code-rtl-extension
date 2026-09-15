@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: a Hebrew paragraph that opens with an English word no longer renders LTR** (#20) - Claude Code's own stylesheet sets `unicode-bidi: plaintext` on every `p/li/h1-h6/blockquote/td/th` inside a markdown root, so each block takes its direction from its first strong character. A sentence such as "React מרנדר את הקומפוננטה מחדש בכל שינוי state" was rendered left-to-right no matter how much Hebrew followed, which is common in technical chat where a sentence opens with an identifier, a version, or an ordered-list letter. CSS alone cannot fix this because CSS cannot count characters, so a small resolver now runs in the webview: it reads each block's text with code spans excluded, so a path or an identifier cannot decide a sentence, gives the block the direction of the majority of its words, and tags it. Companion CSS acts on the tag and overrides the first-character guess. English-only paragraphs are now tagged LTR and left-aligned instead of being right-aligned along with the rest of the chat. Active, Always and Auto modes all get it, LTR Always is untouched, and Always mode - which previously injected no JS at all - now ships the resolver on its own.
+
 ## v0.5.0
 
 - **New: Force LTR (Always) mode** (`Claude RTL: Force LTR (Always)`) — pins the whole chat (messages, input box, question/permission dialogs, Plan Preview) to left-to-right, even when the conversation contains Hebrew, Arabic, or Persian text. The direction choice is now symmetric: users who want RTL pick an RTL mode, users who prefer a stable LTR layout while chatting in an RTL language pick LTR Always. Shown in the status bar as `LTR: Always` and available from the status-bar menu; survives Claude Code updates via auto-reactivate like the other modes. (Contributed by @moeseif in #19.)

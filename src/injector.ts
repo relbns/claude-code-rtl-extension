@@ -7,6 +7,7 @@ import {
     JS_START_MARKER, JS_END_MARKER,
     RTL_MODE_ALWAYS_MARKER, RTL_MODE_AUTO_MARKER, RTL_MODE_LTR_MARKER,
     RTL_AUTO_JS_CODE,
+    RTL_BLOCK_DIRECTION_JS_ONLY,
     generateActiveCssRules, generateAlwaysCssRules, generateAutoCssRules, generateLtrCssRules,
     PLAN_CSS_START_MARKER, PLAN_CSS_END_MARKER,
     PLAN_JS_START_MARKER, PLAN_JS_END_MARKER,
@@ -403,13 +404,12 @@ async function addRtlAlwaysImpl(ext: ClaudeExtensionInfo, fonts?: FontOptions): 
         changed = true;
     }
 
-    // Remove JS button if installed
-    if (ext.jsPath && await isJsInstalled(ext.jsPath)) {
-        if (await restoreAndDeleteBackup(ext.jsPath, 'JS', messages)) {
-            changed = true;
-        }
-    } else {
-        messages.push(`  JS:  No button to remove (Always mode — no JS needed)`);
+    // No toggle button in Always mode, but the block-direction resolver still ships
+    if (!ext.jsPath) {
+        messages.push('  JS:  index.js not found, skipping block-direction resolver');
+    } else if (await injectFile(ext.jsPath, RTL_BLOCK_DIRECTION_JS_ONLY, 'JS', messages)) {
+        messages.push(`  JS:  Block-direction resolver added to ${ext.name}`);
+        changed = true;
     }
 
     if (await injectPlanPreview(ext.extensionJsPath, generatePlanAlwaysCss(fonts), null, messages)) {

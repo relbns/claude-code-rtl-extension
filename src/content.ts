@@ -207,6 +207,42 @@ ${p}[class*="thinkingContent_"] [class*="root_"] :is(ul, ol, li) {
 /** Force-LTR content rules — unprefixed (LTR Always mode).
  *  Pins every content surface to left-to-right, overriding the webview's
  *  auto direction detection, so Hebrew/Arabic text renders in an LTR layout. */
+/**
+ * Per-block direction, resolved from the block's own text.
+ *
+ * Claude Code's own stylesheet sets `unicode-bidi: plaintext` on every
+ * `p/li/h1-h6/blockquote/td/th` inside a markdown root, so each block takes its
+ * direction from its first strong character. A Hebrew paragraph that opens with an
+ * English word therefore renders LTR no matter what the rest of it says, and no CSS
+ * rule can fix it because CSS cannot count characters. BLOCK_DIRECTION_JS tags each
+ * block with the direction of its majority of words, and these rules act on the tag.
+ */
+function blockDirectionRules(p: string): string {
+    return `
+/* ==========================================
+   Per-block direction - tagged by the resolver in JS
+   ========================================== */
+
+${p}[data-yby-dir="rtl"] {
+    direction: rtl !important;
+    unicode-bidi: isolate !important;
+    text-align: right !important;
+}
+
+${p}[data-yby-dir="ltr"] {
+    direction: ltr !important;
+    unicode-bidi: isolate !important;
+    text-align: left !important;
+}
+
+${p}[data-yby-dir] :is(pre, code, [class*="codeBlockWrapper_"]) {
+    direction: ltr !important;
+    unicode-bidi: isolate !important;
+    text-align: left !important;
+}
+`;
+}
+
 const LTR_CONTENT_RULES = `
 /* ==========================================
    LTR - Force left-to-right always
@@ -511,6 +547,7 @@ export function generateActiveCssRules(fonts: FontOptions = NO_FONTS): string {
     return assembleCss(RTL_MODE_ACTIVE_MARKER, [
         BUTTON_STYLES,
         rtlContentRules(P),
+        blockDirectionRules(P),
         ltrOverrideRules(P),
         generateFontCss(fonts),
     ]);
@@ -520,6 +557,7 @@ export function generateActiveCssRules(fonts: FontOptions = NO_FONTS): string {
 export function generateAlwaysCssRules(fonts: FontOptions = NO_FONTS): string {
     return assembleCss(RTL_MODE_ALWAYS_MARKER, [
         rtlContentRules(''),
+        blockDirectionRules(''),
         ltrOverrideRules(''),
         generateFontCss(fonts),
     ]);
@@ -530,6 +568,7 @@ export function generateAlwaysCssRules(fonts: FontOptions = NO_FONTS): string {
 export function generateAutoCssRules(fonts: FontOptions = NO_FONTS): string {
     return assembleCss(RTL_MODE_AUTO_MARKER, [
         AUTO_RTL_RULES,
+        blockDirectionRules(P),
         ltrOverrideRules(P),
         PERMISSION_RTL_CSS,
         generateFontCss(fonts),
@@ -546,6 +585,125 @@ export function generateLtrCssRules(fonts: FontOptions = NO_FONTS): string {
 }
 
 // ── JavaScript ────────────────────────────────────────────────────
+
+/**
+ * Resolves the direction of each markdown block from its own words and tags it.
+ *
+ * A block belongs to the direction of most of its words, a word belongs to its first
+ * strong character, and code spans are excluded so a path or an identifier cannot
+ * decide a sentence. Ties go RTL. This overrides the first-strong-character guess
+ * that Claude Code's `unicode-bidi: plaintext` would otherwise make per block.
+ */
+const BLOCK_DIRECTION_JS = `
+/* Per-block direction - resolved from the block's words, not its first character */
+(function() {
+    var RTL_CH = /[\\u0590-\\u05FF\\u0600-\\u06FF\\u0750-\\u077F\\uFB50-\\uFDFF\\uFE70-\\uFEFE]/;
+    var LTR_CH = /[A-Za-z\\u00C0-\\u024F]/;
+    var BLOCK_SEL = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,dd,dt,td,th,summary,figcaption';
+    var SKIP_SEL = 'pre,code,[class*="codeBlockWrapper_"],[class*="toolUse_"],[class*="toolResult_"],[class*="toolBody_"],[class*="thinkingContent_"],[class*="diffEditorWrapper_"],[class*="messageInputContainer_"]';
+    var SCOPE_SEL = '[class*="root_"],[class*="userMessage_"],[class*="userMessageContainer_"]';
+    var MAX_BATCH = 400;
+
+    /* Text of the block minus code spans */
+    function prose(el) {
+        var out = '';
+        for (var n = el.firstChild; n; n = n.nextSibling) {
+            if (n.nodeType === 3) out += n.nodeValue;
+            else if (n.nodeType === 1 && !(n.matches && n.matches(SKIP_SEL))) out += prose(n);
+        }
+        return out;
+    }
+
+    /* Majority of words wins, a word belongs to its first strong character, ties go RTL */
+    function dirOf(text) {
+        var words = text.split(/[\\s\\u00A0]+/), rtl = 0, ltr = 0;
+        for (var i = 0; i < words.length; i++) {
+            var w = words[i];
+            for (var j = 0; j < w.length; j++) {
+                if (RTL_CH.test(w[j])) { rtl++; break; }
+                if (LTR_CH.test(w[j])) { ltr++; break; }
+            }
+        }
+        if (!rtl && !ltr) return null;
+        return rtl >= ltr ? 'rtl' : 'ltr';
+    }
+
+    function tag(el) {
+        if (!el.matches || el.matches(SKIP_SEL)) return;
+        if (el.closest && el.closest(SKIP_SEL)) return;
+        var d = dirOf(prose(el));
+        if (!d || el.getAttribute('data-yby-dir') === d) return;
+        el.setAttribute('data-yby-dir', d);
+        el.setAttribute('dir', d);
+    }
+
+    /* A bubble with no block children carries its text directly */
+    function tagScope(scope) {
+        var blocks = scope.querySelectorAll(BLOCK_SEL);
+        if (!blocks.length) { tag(scope); return; }
+        for (var i = 0; i < blocks.length; i++) tag(blocks[i]);
+    }
+
+    function scanAll() {
+        var scopes = document.querySelectorAll(SCOPE_SEL);
+        for (var i = 0; i < scopes.length; i++) tagScope(scopes[i]);
+    }
+
+    var root = document.getElementById('root');
+    if (!root) return;
+    scanAll();
+
+    var pending = [], timer = null;
+
+    function queue(el) {
+        if (!el || pending.length >= MAX_BATCH) return;
+        if (pending.indexOf(el) === -1) pending.push(el);
+    }
+
+    function queueFrom(el) {
+        if (!el || el.nodeType !== 1 || !el.closest) return;
+        if (!el.closest(SCOPE_SEL)) return;
+        queue(el.closest(BLOCK_SEL) || el.closest(SCOPE_SEL));
+    }
+
+    /* Debounced so a streaming response is re-tagged in batches, not per character */
+    new MutationObserver(function(muts) {
+        for (var i = 0; i < muts.length; i++) {
+            var m = muts[i];
+            if (m.type === 'characterData') { queueFrom(m.target.parentElement); continue; }
+            for (var j = 0; j < m.addedNodes.length; j++) {
+                var nd = m.addedNodes[j];
+                if (nd.nodeType === 3) { queueFrom(nd.parentElement); continue; }
+                if (nd.nodeType !== 1) continue;
+                queueFrom(nd);
+                if (!nd.querySelectorAll) continue;
+                var inner = nd.querySelectorAll(BLOCK_SEL);
+                for (var k = 0; k < inner.length; k++) queue(inner[k]);
+                var scopes = nd.querySelectorAll(SCOPE_SEL);
+                for (var s = 0; s < scopes.length; s++) queue(scopes[s]);
+            }
+        }
+        if (timer || !pending.length) return;
+        timer = setTimeout(function() {
+            timer = null;
+            var batch = pending;
+            pending = [];
+            for (var i = 0; i < batch.length; i++) {
+                var el = batch[i];
+                if (el.isConnected === false) continue;
+                if (el.matches && el.matches(SCOPE_SEL)) tagScope(el); else tag(el);
+            }
+        }, 60);
+    }).observe(root, { childList: true, subtree: true, characterData: true });
+})();
+`;
+
+/** Always mode injects no toggle button, so the resolver ships on its own. */
+export const RTL_BLOCK_DIRECTION_JS_ONLY = `
+${JS_START_MARKER}
+${BLOCK_DIRECTION_JS}
+${JS_END_MARKER}
+`;
 
 /** RTL JS toggle button code */
 export const RTL_JS_CODE = `
@@ -619,6 +777,7 @@ export const RTL_JS_CODE = `
         document.addEventListener('DOMContentLoaded', tryInsertButton);
     }
 })();
+${BLOCK_DIRECTION_JS}
 /* End RTL Toggle Button */
 `;
 
@@ -907,5 +1066,6 @@ export const RTL_AUTO_JS_CODE = `
     }).observe(scanRoot, { childList: true, subtree: true, characterData: true });
 })();
 ${PERMISSION_RTL_JS}
+${BLOCK_DIRECTION_JS}
 /* End RTL Toggle Button */
 `;
