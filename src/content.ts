@@ -597,14 +597,25 @@ export function generateLtrCssRules(fonts: FontOptions = NO_FONTS): string {
 const BLOCK_DIRECTION_JS = `
 /* Per-block direction - resolved from the block's words, not its first character */
 (function() {
-    var RTL_CH = /[\\u0590-\\u05FF\\u0600-\\u06FF\\u0750-\\u077F\\uFB50-\\uFDFF\\uFE70-\\uFEFE]/;
-    var LTR_CH = /[A-Za-z\\u00C0-\\u024F]/;
-    var BLOCK_SEL = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,dd,dt,td,th,summary,figcaption';
-    var SKIP_SEL = 'pre,code,[class*="codeBlockWrapper_"],[class*="toolUse_"],[class*="toolResult_"],[class*="toolBody_"],[class*="thinkingContent_"],[class*="diffEditorWrapper_"],[class*="messageInputContainer_"]';
-    var SCOPE_SEL = '[class*="root_"],[class*="userMessage_"],[class*="userMessageContainer_"]';
-    var MAX_BATCH = 400;
+    var RTL_CH = /[֐-׿؀-ۿݐ-ݿﭐ-﷿ﹰ-﻾]/;
+    var LTR_CH = /[A-Za-zÀ-ɏ]/;
 
-    /* Text of the block minus code spans */
+    /* Exactly the blocks Claude Code's own plaintext rule targets */
+    var BLOCK_SEL = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,td,th';
+
+    /* Code, chrome, and everything the extension already governs with its own rules.
+       Without this the resolver reaches into the session header, the session list and
+       the question dialog, none of which are markdown. */
+    var SKIP_SEL = 'pre,code' +
+        ',[class*="codeBlockWrapper_"],[class*="toolUse_"],[class*="toolSummary_"],[class*="toolBody_"],[class*="toolResult_"]' +
+        ',[class*="thinkingContent_"],[class*="diffEditorWrapper_"]' +
+        ',[class*="messageInputContainer_"],[class*="otherInput_"]' +
+        ',[class*="questionBlock_"],[class*="questionHeader_"],[class*="questionText"],[class*="answerText_"]' +
+        ',[class*="optionText_"],[class*="optionContent_"],[class*="optionLabel_"],[class*="optionDescription_"]' +
+        ',[class*="permissionsContainer_"],[class*="permissionRequestContent_"],[class*="buttonContainer_"],[class*="keyboardHints_"]' +
+        ',[class*="header_"],[class*="sessionItem_"],[class*="sessionsList_"],[class*="todoList_"],[class*="slashCommand"]';
+
+    /* Text of the block minus code spans, so a path cannot decide a sentence */
     function prose(el) {
         var out = '';
         for (var n = el.firstChild; n; n = n.nextSibling) {
@@ -616,7 +627,7 @@ const BLOCK_DIRECTION_JS = `
 
     /* Majority of words wins, a word belongs to its first strong character, ties go RTL */
     function dirOf(text) {
-        var words = text.split(/[\\s\\u00A0]+/), rtl = 0, ltr = 0;
+        var words = text.split(/[\\s ]+/), rtl = 0, ltr = 0;
         for (var i = 0; i < words.length; i++) {
             var w = words[i];
             for (var j = 0; j < w.length; j++) {
@@ -628,59 +639,45 @@ const BLOCK_DIRECTION_JS = `
         return rtl >= ltr ? 'rtl' : 'ltr';
     }
 
+    /* Only blocks that actually derive their direction from the first strong character
+       are in scope. Checked before tagging, since tagging replaces plaintext with isolate. */
     function tag(el) {
-        if (!el.matches || el.matches(SKIP_SEL)) return;
-        if (el.closest && el.closest(SKIP_SEL)) return;
+        if (!el.matches || !el.matches(BLOCK_SEL) || el.closest(SKIP_SEL)) return;
+        if (!el.hasAttribute('data-yby-dir') &&
+            getComputedStyle(el).unicodeBidi !== 'plaintext') return;
         var d = dirOf(prose(el));
         if (!d || el.getAttribute('data-yby-dir') === d) return;
         el.setAttribute('data-yby-dir', d);
         el.setAttribute('dir', d);
     }
 
-    /* A bubble with no block children carries its text directly */
-    function tagScope(scope) {
-        var blocks = scope.querySelectorAll(BLOCK_SEL);
-        if (!blocks.length) { tag(scope); return; }
-        for (var i = 0; i < blocks.length; i++) tag(blocks[i]);
-    }
-
-    function scanAll() {
-        var scopes = document.querySelectorAll(SCOPE_SEL);
-        for (var i = 0; i < scopes.length; i++) tagScope(scopes[i]);
-    }
-
     var root = document.getElementById('root');
     if (!root) return;
-    scanAll();
 
-    var pending = [], timer = null;
+    var all = root.querySelectorAll(BLOCK_SEL);
+    for (var i = 0; i < all.length; i++) tag(all[i]);
+
+    var pending = [], timer = null, MAX_BATCH = 400;
 
     function queue(el) {
-        if (!el || pending.length >= MAX_BATCH) return;
-        if (pending.indexOf(el) === -1) pending.push(el);
-    }
-
-    function queueFrom(el) {
-        if (!el || el.nodeType !== 1 || !el.closest) return;
-        if (!el.closest(SCOPE_SEL)) return;
-        queue(el.closest(BLOCK_SEL) || el.closest(SCOPE_SEL));
+        if (!el || el.nodeType !== 1 || !el.closest || pending.length >= MAX_BATCH) return;
+        var block = el.closest(BLOCK_SEL);
+        if (block && pending.indexOf(block) === -1) pending.push(block);
     }
 
     /* Debounced so a streaming response is re-tagged in batches, not per character */
     new MutationObserver(function(muts) {
         for (var i = 0; i < muts.length; i++) {
             var m = muts[i];
-            if (m.type === 'characterData') { queueFrom(m.target.parentElement); continue; }
+            if (m.type === 'characterData') { queue(m.target.parentElement); continue; }
             for (var j = 0; j < m.addedNodes.length; j++) {
                 var nd = m.addedNodes[j];
-                if (nd.nodeType === 3) { queueFrom(nd.parentElement); continue; }
+                if (nd.nodeType === 3) { queue(nd.parentElement); continue; }
                 if (nd.nodeType !== 1) continue;
-                queueFrom(nd);
+                queue(nd);
                 if (!nd.querySelectorAll) continue;
                 var inner = nd.querySelectorAll(BLOCK_SEL);
                 for (var k = 0; k < inner.length; k++) queue(inner[k]);
-                var scopes = nd.querySelectorAll(SCOPE_SEL);
-                for (var s = 0; s < scopes.length; s++) queue(scopes[s]);
             }
         }
         if (timer || !pending.length) return;
@@ -689,9 +686,7 @@ const BLOCK_DIRECTION_JS = `
             var batch = pending;
             pending = [];
             for (var i = 0; i < batch.length; i++) {
-                var el = batch[i];
-                if (el.isConnected === false) continue;
-                if (el.matches && el.matches(SCOPE_SEL)) tagScope(el); else tag(el);
+                if (batch[i].isConnected !== false) tag(batch[i]);
             }
         }, 60);
     }).observe(root, { childList: true, subtree: true, characterData: true });
