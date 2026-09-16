@@ -645,7 +645,9 @@ const BLOCK_DIRECTION_JS = `
         if (!el.matches || !el.matches(BLOCK_SEL) || el.closest(SKIP_SEL)) return;
         if (!el.hasAttribute('data-yby-dir') &&
             getComputedStyle(el).unicodeBidi !== 'plaintext') return;
-        var d = dirOf(prose(el));
+        /* A block whose text is entirely code has no prose to judge; let its code
+           decide, so an all-code or all-English block aligns left. */
+        var d = dirOf(prose(el)) || dirOf(el.textContent || '');
         if (!d || el.getAttribute('data-yby-dir') === d) return;
         el.setAttribute('data-yby-dir', d);
         el.setAttribute('dir', d);
