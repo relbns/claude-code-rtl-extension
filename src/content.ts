@@ -656,18 +656,39 @@ const BLOCK_DIRECTION_JS = `
     var root = document.getElementById('root');
     if (!root) return;
 
+    /* Everything already on screen is complete, so it can be tagged at once */
     var all = root.querySelectorAll(BLOCK_SEL);
     for (var i = 0; i < all.length; i++) tag(all[i]);
 
-    var pending = [], timer = null, MAX_BATCH = 400;
+    /* A block is judged only once it stops changing. Tagging a block that is still
+       being streamed would flip its direction as the majority moves - a paragraph
+       opening with an English word reads LTR until enough Hebrew arrives - and the
+       text visibly jumps from side to side on every re-evaluation. */
+    var SETTLE_MS = 400, MAX_PENDING = 400;
+    var pending = [], timer = null;
 
     function queue(el) {
-        if (!el || el.nodeType !== 1 || !el.closest || pending.length >= MAX_BATCH) return;
+        if (!el || el.nodeType !== 1 || !el.closest) return;
         var block = el.closest(BLOCK_SEL);
-        if (block && pending.indexOf(block) === -1) pending.push(block);
+        if (!block) return;
+        block.YBYlastChange = Date.now();
+        if (pending.indexOf(block) !== -1 || pending.length >= MAX_PENDING) return;
+        pending.push(block);
     }
 
-    /* Debounced so a streaming response is re-tagged in batches, not per character */
+    function flush() {
+        timer = null;
+        var now = Date.now(), waiting = [];
+        for (var i = 0; i < pending.length; i++) {
+            var el = pending[i];
+            if (el.isConnected === false) continue;
+            if (now - (el.YBYlastChange || 0) >= SETTLE_MS) tag(el);
+            else waiting.push(el);
+        }
+        pending = waiting;
+        if (pending.length) timer = setTimeout(flush, SETTLE_MS);
+    }
+
     new MutationObserver(function(muts) {
         for (var i = 0; i < muts.length; i++) {
             var m = muts[i];
@@ -682,15 +703,7 @@ const BLOCK_DIRECTION_JS = `
                 for (var k = 0; k < inner.length; k++) queue(inner[k]);
             }
         }
-        if (timer || !pending.length) return;
-        timer = setTimeout(function() {
-            timer = null;
-            var batch = pending;
-            pending = [];
-            for (var i = 0; i < batch.length; i++) {
-                if (batch[i].isConnected !== false) tag(batch[i]);
-            }
-        }, 60);
+        if (!timer && pending.length) timer = setTimeout(flush, SETTLE_MS);
     }).observe(root, { childList: true, subtree: true, characterData: true });
 })();
 `;
